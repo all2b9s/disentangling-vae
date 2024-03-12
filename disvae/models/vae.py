@@ -6,13 +6,13 @@ from torch import nn, optim
 from torch.nn import functional as F
 
 from disvae.utils.initialization import weights_init
-from .encoders import get_encoder
-from .decoders import get_decoder
+from .encoders import EncoderSpec
+from .decoders import DecoderSpec
 
 MODELS = ["Burgess"]
+cos_dim = 3
 
-
-def init_specific_model(model_type, img_size, latent_dim):
+def init_specific_model(model_type, spec_length, latent_dim, hyperparameters):
     """Return an instance of a VAE with encoder and decoder from `model_type`."""
     model_type = model_type.lower().capitalize()
     if model_type not in MODELS:
@@ -21,13 +21,13 @@ def init_specific_model(model_type, img_size, latent_dim):
 
     encoder = get_encoder(model_type)
     decoder = get_decoder(model_type)
-    model = VAE(img_size, encoder, decoder, latent_dim)
+    model = VAE(spec_length, encoder, decoder, latent_dim, hyperparameters)
     model.model_type = model_type  # store to help reloading
     return model
 
 
 class VAE(nn.Module):
-    def __init__(self, img_size, encoder, decoder, latent_dim):
+    def __init__(self, spec_dim, latent_dim, hyperparameters = [3,3], cos_dim=4):
         """
         Class which defines model and forward pass.
 
@@ -37,15 +37,11 @@ class VAE(nn.Module):
             Size of images. E.g. (1, 32, 32) or (3, 64, 64).
         """
         super(VAE, self).__init__()
-
-        if list(img_size[1:]) not in [[32, 32], [64, 64]]:
-            raise RuntimeError("{} sized images not supported. Only (None, 32, 32) and (None, 64, 64) supported. Build your own architecture or reshape images!".format(img_size))
-
+        e_layers, d_layers = hyperparameters
+        self.spec_dim = spec_dim
         self.latent_dim = latent_dim
-        self.img_size = img_size
-        self.num_pixels = self.img_size[1] * self.img_size[2]
-        self.encoder = encoder(img_size, self.latent_dim)
-        self.decoder = decoder(img_size, self.latent_dim)
+        self.encoder = EncoderSpec(spec_dim, e_layers, latent_dim = latent_dim, cos_dim = cos_dim)
+        self.decoder = DecoderSpec(spec_dim, d_layers, latent_dim = latent_dim, cos_dim = cos_dim)
 
         self.reset_parameters()
 
@@ -77,11 +73,14 @@ class VAE(nn.Module):
         Parameters
         ----------
         x : torch.Tensor
-            Batch of data. Shape (batch_size, n_chan, height, width)
+            Batch of data. Shape (batch_size, n_chan, n_spec+n_cos)
         """
+        batch_size = x.size(0)
+        cos = x[:,:,self.spec_dim:].clone().view((batch_size,-1))
         latent_dist = self.encoder(x)
         latent_sample = self.reparameterize(*latent_dist)
-        reconstruct = self.decoder(latent_sample)
+        dc_input = torch.cat([latent_sample,cos],dim=1)
+        reconstruct = self.decoder(dc_input)
         return reconstruct, latent_dist, latent_sample
 
     def reset_parameters(self):

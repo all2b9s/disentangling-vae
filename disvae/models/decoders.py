@@ -13,8 +13,8 @@ def get_decoder(model_type):
     return eval("Decoder{}".format(model_type))
 
 
-class DecoderBurgess(nn.Module):
-    def __init__(self, img_size,
+class DecoderSpec(nn.Module):
+    def __init__(self, spec_dim, d_layers, cos_dim=4,
                  latent_dim=10):
         r"""Decoder of the model proposed in [1].
 
@@ -37,48 +37,29 @@ class DecoderBurgess(nn.Module):
             [1] Burgess, Christopher P., et al. "Understanding disentangling in
             $\beta$-VAE." arXiv preprint arXiv:1804.03599 (2018).
         """
-        super(DecoderBurgess, self).__init__()
+        super(DecoderSpec, self).__init__()
 
         # Layer parameters
-        hid_channels = 32
-        kernel_size = 4
-        hidden_dim = 256
-        self.img_size = img_size
-        # Shape required to start transpose convs
-        self.reshape = (hid_channels, kernel_size, kernel_size)
-        n_chan = self.img_size[0]
-        self.img_size = img_size
+        self.hidden_dim = 256
 
         # Fully connected layers
-        self.lin1 = nn.Linear(latent_dim, hidden_dim)
-        self.lin2 = nn.Linear(hidden_dim, hidden_dim)
-        self.lin3 = nn.Linear(hidden_dim, np.product(self.reshape))
+        self.lin_1 = nn.Linear(latent_dim+cos_dim*2, self.hidden_dim)
+        lin_mid = []
+        for i in range(0,d_layers):
+            lin_mid.append(nn.Linear(self.hidden_dim, self.hidden_dim))
+            lin_mid.append(nn.ReLU())
+        self.lin_mid = nn.Sequential(*lin_mid)
+        self.lin_f = nn.Linear(self.hidden_dim, spec_dim)
 
-        # Convolutional layers
-        cnn_kwargs = dict(stride=2, padding=1)
-        # If input image is 64x64 do fourth convolution
-        if self.img_size[1] == self.img_size[2] == 64:
-            self.convT_64 = nn.ConvTranspose2d(hid_channels, hid_channels, kernel_size, **cnn_kwargs)
-
-        self.convT1 = nn.ConvTranspose2d(hid_channels, hid_channels, kernel_size, **cnn_kwargs)
-        self.convT2 = nn.ConvTranspose2d(hid_channels, hid_channels, kernel_size, **cnn_kwargs)
-        self.convT3 = nn.ConvTranspose2d(hid_channels, n_chan, kernel_size, **cnn_kwargs)
 
     def forward(self, z):
         batch_size = z.size(0)
-
+        z = z.view((batch_size,-1))
+        
         # Fully connected layers with ReLu activations
-        x = torch.relu(self.lin1(z))
-        x = torch.relu(self.lin2(x))
-        x = torch.relu(self.lin3(x))
-        x = x.view(batch_size, *self.reshape)
-
-        # Convolutional layers with ReLu activations
-        if self.img_size[1] == self.img_size[2] == 64:
-            x = torch.relu(self.convT_64(x))
-        x = torch.relu(self.convT1(x))
-        x = torch.relu(self.convT2(x))
-        # Sigmoid activation for final conv layer
-        x = torch.sigmoid(self.convT3(x))
+        x = torch.relu(self.lin_1(z))
+        x = torch.relu(self.lin_mid(x))
+        x = self.lin_f(x)
+        x = x.view((batch_size,-1))
 
         return x
