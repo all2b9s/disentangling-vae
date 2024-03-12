@@ -47,7 +47,6 @@ class Trainer():
                  device=torch.device("cpu"),
                  logger=logging.getLogger(__name__),
                  save_dir="results",
-                 gif_visualizer=None,
                  is_progress_bar=True):
 
         self.device = device
@@ -58,7 +57,6 @@ class Trainer():
         self.is_progress_bar = is_progress_bar
         self.logger = logger
         self.losses_logger = LossesLogger(os.path.join(self.save_dir, TRAIN_LOSSES_LOGFILE))
-        self.gif_visualizer = gif_visualizer
         self.logger.info("Training Device: {}".format(self.device))
 
     def __call__(self, data_loader,
@@ -82,8 +80,7 @@ class Trainer():
         for epoch in range(epochs):
             storer = defaultdict(list)
             mean_epoch_loss = self._train_epoch(data_loader, storer, epoch)
-            self.logger.info('Epoch: {} Average loss per image: {:.2f}'.format(epoch + 1,
-                                                                               mean_epoch_loss))
+            self.logger.info('Epoch: {} Average loss: {:.2f}'.format(epoch + 1, mean_epoch_loss))
             self.losses_logger.log(epoch, storer)
 
             if self.gif_visualizer is not None:
@@ -92,9 +89,6 @@ class Trainer():
             if epoch % checkpoint_every == 0:
                 save_model(self.model, self.save_dir,
                            filename="model-{}.pt".format(epoch))
-
-        if self.gif_visualizer is not None:
-            self.gif_visualizer.save_reset()
 
         self.model.eval()
 
@@ -151,8 +145,7 @@ class Trainer():
 
         try:
             recon_batch, latent_dist, latent_sample = self.model(data)
-            loss = self.loss_f(data, recon_batch, latent_dist, self.model.training,
-                               storer, latent_sample=latent_sample)
+            loss = self.loss_f(data, recon_batch, latent_dist, self.model.training, storer, latent_sample=latent_sample)
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()

@@ -9,7 +9,6 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch import optim
 
-from .discriminator import Discriminator
 from disvae.utils.math import (log_density_gaussian, log_importance_weight_matrix,
                                matrix_log_density_gaussian)
 
@@ -23,22 +22,8 @@ def get_loss_f(loss_name, **kwargs_parse):
     """Return the correct loss function given the argparse arguments."""
     kwargs_all = dict(rec_dist=kwargs_parse["rec_dist"],
                       steps_anneal=kwargs_parse["reg_anneal"])
-    if loss_name == "betaH":
-        return BetaHLoss(beta=kwargs_parse["betaH_B"], **kwargs_all)
-    elif loss_name == "VAE":
-        return BetaHLoss(beta=1, **kwargs_all)
-    elif loss_name == "betaB":
-        return BetaBLoss(C_init=kwargs_parse["betaB_initC"],
-                         C_fin=kwargs_parse["betaB_finC"],
-                         gamma=kwargs_parse["betaB_G"],
-                         **kwargs_all)
-    elif loss_name == "factor":
-        return FactorKLoss(kwargs_parse["device"],
-                           gamma=kwargs_parse["factor_G"],
-                           disc_kwargs=dict(latent_dim=kwargs_parse["latent_dim"]),
-                           optim_kwargs=dict(lr=kwargs_parse["lr_disc"], betas=(0.5, 0.9)),
-                           **kwargs_all)
-    elif loss_name == "btcvae":
+
+    if loss_name == "btcvae":
         return BtcvaeLoss(kwargs_parse["n_data"],
                           alpha=kwargs_parse["btcvae_A"],
                           beta=kwargs_parse["btcvae_B"],
@@ -68,7 +53,7 @@ class BaseLoss(abc.ABC):
         Number of annealing steps where gradually adding the regularisation.
     """
 
-    def __init__(self, record_loss_every=50, rec_dist="bernoulli", steps_anneal=0):
+    def __init__(self, record_loss_every=10, rec_dist="gaussian", steps_anneal=0):
         self.n_train_steps = 0
         self.record_loss_every = record_loss_every
         self.rec_dist = rec_dist
@@ -114,205 +99,6 @@ class BaseLoss(abc.ABC):
         return storer
 
 
-class BetaHLoss(BaseLoss):
-    """
-    Compute the Beta-VAE loss as in [1]
-
-    Parameters
-    ----------
-    beta : float, optional
-        Weight of the kl divergence.
-
-    kwargs:
-        Additional arguments for `BaseLoss`, e.g. rec_dist`.
-
-    References
-    ----------
-        [1] Higgins, Irina, et al. "beta-vae: Learning basic visual concepts with
-        a constrained variational framework." (2016).
-    """
-
-    def __init__(self, beta=4, **kwargs):
-        super().__init__(**kwargs)
-        self.beta = beta
-
-    def __call__(self, data, recon_data, latent_dist, is_train, storer, **kwargs):
-        storer = self._pre_call(is_train, storer)
-
-        rec_loss = _reconstruction_loss(data, recon_data,
-                                        storer=storer,
-                                        distribution=self.rec_dist)
-        kl_loss = _kl_normal_loss(*latent_dist, storer)
-        anneal_reg = (linear_annealing(0, 1, self.n_train_steps, self.steps_anneal)
-                      if is_train else 1)
-        loss = rec_loss + anneal_reg * (self.beta * kl_loss)
-
-        if storer is not None:
-            storer['loss'].append(loss.item())
-
-        return loss
-
-
-class BetaBLoss(BaseLoss):
-    """
-    Compute the Beta-VAE loss as in [1]
-
-    Parameters
-    ----------
-    C_init : float, optional
-        Starting annealed capacity C.
-
-    C_fin : float, optional
-        Final annealed capacity C.
-
-    gamma : float, optional
-        Weight of the KL divergence term.
-
-    kwargs:
-        Additional arguments for `BaseLoss`, e.g. rec_dist`.
-
-    References
-    ----------
-        [1] Burgess, Christopher P., et al. "Understanding disentangling in
-        $\beta$-VAE." arXiv preprint arXiv:1804.03599 (2018).
-    """
-
-    def __init__(self, C_init=0., C_fin=20., gamma=100., **kwargs):
-        super().__init__(**kwargs)
-        self.gamma = gamma
-        self.C_init = C_init
-        self.C_fin = C_fin
-
-    def __call__(self, data, recon_data, latent_dist, is_train, storer, **kwargs):
-        storer = self._pre_call(is_train, storer)
-
-        rec_loss = _reconstruction_loss(data, recon_data,
-                                        storer=storer,
-                                        distribution=self.rec_dist)
-        kl_loss = _kl_normal_loss(*latent_dist, storer)
-
-        C = (linear_annealing(self.C_init, self.C_fin, self.n_train_steps, self.steps_anneal)
-             if is_train else self.C_fin)
-
-        loss = rec_loss + self.gamma * (kl_loss - C).abs()
-
-        if storer is not None:
-            storer['loss'].append(loss.item())
-
-        return loss
-
-
-class FactorKLoss(BaseLoss):
-    """
-    Compute the Factor-VAE loss as per Algorithm 2 of [1]
-
-    Parameters
-    ----------
-    device : torch.device
-
-    gamma : float, optional
-        Weight of the TC loss term. `gamma` in the paper.
-
-    discriminator : disvae.discriminator.Discriminator
-
-    optimizer_d : torch.optim
-
-    kwargs:
-        Additional arguments for `BaseLoss`, e.g. rec_dist`.
-
-    References
-    ----------
-        [1] Kim, Hyunjik, and Andriy Mnih. "Disentangling by factorising."
-        arXiv preprint arXiv:1802.05983 (2018).
-    """
-
-    def __init__(self, device,
-                 gamma=10.,
-                 disc_kwargs={},
-                 optim_kwargs=dict(lr=5e-5, betas=(0.5, 0.9)),
-                 **kwargs):
-        super().__init__(**kwargs)
-        self.gamma = gamma
-        self.device = device
-        self.discriminator = Discriminator(**disc_kwargs).to(self.device)
-        self.optimizer_d = optim.Adam(self.discriminator.parameters(), **optim_kwargs)
-
-    def __call__(self, *args, **kwargs):
-        raise ValueError("Use `call_optimize` to also train the discriminator")
-
-    def call_optimize(self, data, model, optimizer, storer):
-        storer = self._pre_call(model.training, storer)
-
-        # factor-vae split data into two batches. In the paper they sample 2 batches
-        batch_size = data.size(dim=0)
-        half_batch_size = batch_size // 2
-        data = data.split(half_batch_size)
-        data1 = data[0]
-        data2 = data[1]
-
-        # Factor VAE Loss
-        recon_batch, latent_dist, latent_sample1 = model(data1)
-        rec_loss = _reconstruction_loss(data1, recon_batch,
-                                        storer=storer,
-                                        distribution=self.rec_dist)
-
-        kl_loss = _kl_normal_loss(*latent_dist, storer)
-
-        d_z = self.discriminator(latent_sample1)
-        # We want log(p_true/p_false). If not using logisitc regression but softmax
-        # then p_true = exp(logit_true) / Z; p_false = exp(logit_false) / Z
-        # so log(p_true/p_false) = logit_true - logit_false
-        tc_loss = (d_z[:, 0] - d_z[:, 1]).mean()
-        # with sigmoid (not good results) should be `tc_loss = (2 * d_z.flatten()).mean()`
-
-        anneal_reg = (linear_annealing(0, 1, self.n_train_steps, self.steps_anneal)
-                      if model.training else 1)
-        vae_loss = rec_loss + kl_loss + anneal_reg * self.gamma * tc_loss
-
-        if storer is not None:
-            storer['loss'].append(vae_loss.item())
-            storer['tc_loss'].append(tc_loss.item())
-
-        if not model.training:
-            # don't backprop if evaluating
-            return vae_loss
-
-        # Compute VAE gradients
-        optimizer.zero_grad()
-        vae_loss.backward(retain_graph=True)
-
-        # Discriminator Loss
-        # Get second sample of latent distribution
-        latent_sample2 = model.sample_latent(data2)
-        z_perm = _permute_dims(latent_sample2).detach()
-        d_z_perm = self.discriminator(z_perm)
-
-        # Calculate total correlation loss
-        # for cross entropy the target is the index => need to be long and says
-        # that it's first output for d_z and second for perm
-        ones = torch.ones(half_batch_size, dtype=torch.long, device=self.device)
-        zeros = torch.zeros_like(ones)
-        d_tc_loss = 0.5 * (F.cross_entropy(d_z, zeros) + F.cross_entropy(d_z_perm, ones))
-        # with sigmoid would be :
-        # d_tc_loss = 0.5 * (self.bce(d_z.flatten(), ones) + self.bce(d_z_perm.flatten(), 1 - ones))
-
-        # TO-DO: check ifshould also anneals discriminator if not becomes too good ???
-        #d_tc_loss = anneal_reg * d_tc_loss
-
-        # Compute discriminator gradients
-        self.optimizer_d.zero_grad()
-        d_tc_loss.backward()
-
-        # Update at the end (since pytorch 1.5. complains if update before)
-        optimizer.step()
-        self.optimizer_d.step()
-
-        if storer is not None:
-            storer['discrim_loss'].append(d_tc_loss.item())
-
-        return vae_loss
-
-
 class BtcvaeLoss(BaseLoss):
     """
     Compute the decomposed KL loss with either minibatch weighted sampling or
@@ -345,12 +131,13 @@ class BtcvaeLoss(BaseLoss):
        autoencoders." Advances in Neural Information Processing Systems. 2018.
     """
 
-    def __init__(self, n_data, alpha=1., beta=6., gamma=1., is_mss=True, **kwargs):
+    def __init__(self, n_data, alpha= 1., beta= 1., gamma= 1.,tau = 1., is_mss=True, **kwargs):
         super().__init__(**kwargs)
         self.n_data = n_data
         self.beta = beta
         self.alpha = alpha
         self.gamma = gamma
+        self.tau = tau
         self.is_mss = is_mss  # minibatch stratified sampling
 
     def __call__(self, data, recon_batch, latent_dist, is_train, storer,
@@ -360,7 +147,7 @@ class BtcvaeLoss(BaseLoss):
 
         rec_loss = _reconstruction_loss(data, recon_batch,
                                         storer=storer,
-                                        distribution=self.rec_dist)
+                                        distribution=self.rec_dist)*self.n_data
         log_pz, log_qz, log_prod_qzi, log_q_zCx = _get_log_pz_qz_prodzi_qzCx(latent_sample,
                                                                              latent_dist,
                                                                              self.n_data,
@@ -376,10 +163,10 @@ class BtcvaeLoss(BaseLoss):
                       if is_train else 1)
 
         # total loss
-        loss = rec_loss + (self.alpha * mi_loss +
+        loss = self.tau*rec_loss + (self.alpha * mi_loss +
                            self.beta * tc_loss +
                            anneal_reg * self.gamma * dw_kl_loss)
-
+        #print(storer)
         if storer is not None:
             storer['loss'].append(loss.item())
             storer['mi_loss'].append(mi_loss.item())
@@ -391,7 +178,7 @@ class BtcvaeLoss(BaseLoss):
         return loss
 
 
-def _reconstruction_loss(data, recon_data, distribution="bernoulli", storer=None):
+def _reconstruction_loss(data, recon_data, distribution="gaussian", storer=None):
     """
     Calculates the per image reconstruction loss for a batch of data. I.e. negative
     log likelihood.
@@ -423,17 +210,13 @@ def _reconstruction_loss(data, recon_data, distribution="bernoulli", storer=None
         Per image cross entropy (i.e. normalized per batch but not pixel and
         channel)
     """
-    batch_size, n_chan, height, width = recon_data.size()
-    is_colored = n_chan == 3
+    batch_size = recon_data.size(0)
 
     if distribution == "bernoulli":
         loss = F.binary_cross_entropy(recon_data, data, reduction="sum")
     elif distribution == "gaussian":
-        # loss in [0,255] space but normalized by 255 to not be too big
-        loss = F.mse_loss(recon_data * 255, data * 255, reduction="sum") / 255
+        loss = F.mse_loss(recon_data, data)
     elif distribution == "laplace":
-        # loss in [0,255] space but normalized by 255 to not be too big but
-        # multiply by 255 and divide 255, is the same as not doing anything for L1
         loss = F.l1_loss(recon_data, data, reduction="sum")
         loss = loss * 3  # emperical value to give similar values than bernoulli => use same hyperparam
         loss = loss * (loss != 0)  # masking to avoid nan
