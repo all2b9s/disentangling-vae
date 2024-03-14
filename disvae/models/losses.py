@@ -94,7 +94,7 @@ class BaseLoss(abc.ABC):
         if not is_train or self.n_train_steps % self.record_loss_every == 1:
             storer = storer
         else:
-            storer = None
+            storer = storer
 
         return storer
 
