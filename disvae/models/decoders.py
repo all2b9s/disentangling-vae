@@ -20,8 +20,7 @@ class DecoderSpec(nn.Module):
 
         Parameters
         ----------
-        img_size : tuple of ints
-            Size of images. E.g. (1, 32, 32) or (3, 64, 64).
+        input_size = [:, 1, latent_dim+spec_dim+cos_dim]
 
         latent_dim : int
             Dimensionality of latent output.
@@ -43,7 +42,7 @@ class DecoderSpec(nn.Module):
         self.hidden_dim = 256
 
         # Fully connected layers
-        self.lin_1 = nn.Linear(latent_dim+cos_dim*2, self.hidden_dim)
+        self.lin_1 = nn.Linear(latent_dim+spec_dim+cos_dim, self.hidden_dim)
         lin_mid = []
         for i in range(0,d_layers):
             lin_mid.append(nn.Linear(self.hidden_dim, self.hidden_dim))

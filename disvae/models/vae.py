@@ -31,10 +31,7 @@ class VAE(nn.Module):
         """
         Class which defines model and forward pass.
 
-        Parameters
-        ----------
-        img_size : tuple of ints
-            Size of images. E.g. (1, 32, 32) or (3, 64, 64).
+        input size: [1, 1, 4, spec_dim+cos_dim]
         """
         super(VAE, self).__init__()
         e_layers, d_layers = hyperparameters
@@ -76,10 +73,11 @@ class VAE(nn.Module):
             Batch of data. Shape (batch_size, n_chan, n_spec+n_cos)
         """
         batch_size = x.size(0)
-        cos = x[:,:,self.spec_dim:].clone().view((batch_size,-1))
-        latent_dist = self.encoder(x)
+        input_data = x[:,:2,:]
+        target_data = x[:,2:3,:].clone().view((batch_size,-1))
+        latent_dist = self.encoder(input_data)
         latent_sample = self.reparameterize(*latent_dist)
-        dc_input = torch.cat([latent_sample,cos],dim=1)
+        dc_input = torch.cat([latent_sample,target_data],dim=1)
         reconstruct = self.decoder(dc_input)
         return reconstruct, latent_dist, latent_sample
 
