@@ -2,12 +2,9 @@
 Module containing all vae losses.
 """
 import abc
-import math
 
 import torch
-import torch.nn as nn
 from torch.nn import functional as F
-from torch import optim
 
 from disvae.utils.math import (log_density_gaussian, log_importance_weight_matrix,
                                matrix_log_density_gaussian)
@@ -20,8 +17,7 @@ RECON_DIST = ["bernoulli", "laplace", "gaussian"]
 # TO-DO: clean n_data and device
 def get_loss_f(loss_name, **kwargs_parse):
     """Return the correct loss function given the argparse arguments."""
-    kwargs_all = dict(rec_dist=kwargs_parse["rec_dist"],
-                      steps_anneal=kwargs_parse["reg_anneal"])
+    kwargs_all = dict(rec_dist=kwargs_parse["rec_dist"])
 
     if loss_name == "btcvae":
         return BtcvaeLoss(kwargs_parse["n_data"],
@@ -40,24 +36,16 @@ class BaseLoss(abc.ABC):
 
     Parameters
     ----------
-    record_loss_every: int, optional
-        Every how many steps to recorsd the loss.
-
     rec_dist: {"bernoulli", "gaussian", "laplace"}, optional
         Reconstruction distribution istribution of the likelihood on the each pixel.
         Implicitely defines the reconstruction loss. Bernoulli corresponds to a
         binary cross entropy (bse), Gaussian corresponds to MSE, Laplace
         corresponds to L1.
 
-    steps_anneal: nool, optional
-        Number of annealing steps where gradually adding the regularisation.
     """
 
-    def __init__(self, record_loss_every=10, rec_dist="gaussian", steps_anneal=0):
-        self.n_train_steps = 0
-        self.record_loss_every = record_loss_every
+    def __init__(self, rec_dist="gaussian"):
         self.rec_dist = rec_dist
-        self.steps_anneal = steps_anneal
 
     @abc.abstractmethod
     def __call__(self, data, recon_data, latent_dist, is_train, storer, **kwargs):
@@ -86,17 +74,6 @@ class BaseLoss(abc.ABC):
         kwargs:
             Loss specific arguments
         """
-
-    def _pre_call(self, is_train, storer):
-        if is_train:
-            self.n_train_steps += 1
-
-        if not is_train or self.n_train_steps % self.record_loss_every == 1:
-            storer = storer
-        else:
-            storer = None
-
-        return storer
 
 
 class BtcvaeLoss(BaseLoss):
@@ -131,7 +108,7 @@ class BtcvaeLoss(BaseLoss):
        autoencoders." Advances in Neural Information Processing Systems. 2018.
     """
 
-    def __init__(self, n_data, alpha= 1., beta= 1., gamma= 1.,tau = 1., is_mss=True, **kwargs):
+    def __init__(self, n_data, alpha=1., beta=1., gamma=1., tau=1., is_mss=True, **kwargs):
         super().__init__(**kwargs)
         self.n_data = n_data
         self.beta = beta
@@ -142,7 +119,6 @@ class BtcvaeLoss(BaseLoss):
 
     def __call__(self, data, recon_batch, latent_dist, is_train, storer,
                  latent_sample=None):
-        storer = self._pre_call(is_train, storer)
         batch_size, latent_dim = latent_sample.shape
 
         rec_loss = _reconstruction_loss(data, recon_batch,
@@ -159,19 +135,15 @@ class BtcvaeLoss(BaseLoss):
         # dw_kl_loss is KL[q(z)||p(z)] instead of usual KL[q(z|x)||p(z))]
         dw_kl_loss = (log_prod_qzi - log_pz).mean()
 
-        anneal_reg = (linear_annealing(0, 1, self.n_train_steps, self.steps_anneal)
-                      if is_train else 1)
-
         # total loss
         loss = self.tau*rec_loss + (self.alpha * mi_loss +
                            self.beta * tc_loss +
-                           anneal_reg * self.gamma * dw_kl_loss)
-        #print(storer)
+                           self.gamma * dw_kl_loss)
         if storer is not None:
-            storer['loss'].append(loss.item())
-            storer['mi_loss'].append(mi_loss.item())
-            storer['tc_loss'].append(tc_loss.item())
-            storer['dw_kl_loss'].append(dw_kl_loss.item())
+            storer['loss'] += loss.detach()
+            storer['mi_loss'] += mi_loss.detach()
+            storer['tc_loss'] += tc_loss.detach()
+            storer['dw_kl_loss'] += dw_kl_loss.detach()
             # computing this for storing and comparaison purposes
             _ = _kl_normal_loss(*latent_dist, storer)
 
@@ -224,10 +196,8 @@ def _reconstruction_loss(data, recon_data, distribution="gaussian", storer=None)
         assert distribution not in RECON_DIST
         raise ValueError("Unkown distribution: {}".format(distribution))
 
-    loss = loss / batch_size
-
     if storer is not None:
-        storer['recon_loss'].append(loss.item())
+        storer['recon_loss'] += loss.detach()
 
     return loss
 
@@ -252,13 +222,13 @@ def _kl_normal_loss(mean, logvar, storer=None):
     """
     latent_dim = mean.size(1)
     # batch mean of kl for each latent dimension
-    latent_kl = 0.5 * (-1 - logvar + mean.pow(2) + logvar.exp()).mean(dim=0)
+    latent_kl = (-0.5 - logvar + 0.5*mean.pow(2) + 0.5*logvar.exp()).mean(dim=0)
     total_kl = latent_kl.sum()
 
     if storer is not None:
-        storer['kl_loss'].append(total_kl.item())
-        for i in range(latent_dim):
-            storer['kl_loss_' + str(i)].append(latent_kl[i].item())
+        storer['kl_loss'] += total_kl.detach()
+        for d in range(latent_dim):
+            storer[f'kl_loss_{d}'] += latent_kl[d].detach()
 
     return total_kl
 
@@ -285,20 +255,10 @@ def _permute_dims(latent_sample):
     batch_size, dim_z = perm.size()
 
     for z in range(dim_z):
-        pi = torch.randperm(batch_size).to(latent_sample.device)
+        pi = torch.randperm(batch_size, device=latent_sample.device)
         perm[:, z] = latent_sample[pi, z]
 
     return perm
-
-
-def linear_annealing(init, fin, step, annealing_steps):
-    """Linear annealing of a parameter."""
-    if annealing_steps == 0:
-        return fin
-    assert fin > init
-    delta = fin - init
-    annealed = min(init + delta * step / annealing_steps, fin)
-    return annealed
 
 
 # Batch TC specific
@@ -318,7 +278,7 @@ def _get_log_pz_qz_prodzi_qzCx(latent_sample, latent_dist, n_data, is_mss=True):
 
     if is_mss:
         # use stratification
-        log_iw_mat = log_importance_weight_matrix(batch_size, n_data).to(latent_sample.device)
+        log_iw_mat = log_importance_weight_matrix(batch_size, n_data, device=latent_sample.device)
         mat_log_qz = mat_log_qz + log_iw_mat.view(batch_size, batch_size, 1)
 
     log_qz = torch.logsumexp(mat_log_qz.sum(2), dim=1, keepdim=False)

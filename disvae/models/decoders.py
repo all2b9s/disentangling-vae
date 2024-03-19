@@ -1,7 +1,7 @@
 """
 Module containing the decoders.
 """
-import numpy as np
+
 
 import torch
 from torch import nn
@@ -15,7 +15,7 @@ def get_decoder(model_type):
 
 class DecoderSpec(nn.Module):
     def __init__(self, spec_dim, d_layers, cos_dim=4,
-                 latent_dim=10):
+                 latent_dim=3, hidden_dim=64):
         r"""Decoder of the model proposed in [1].
 
         Parameters
@@ -39,7 +39,7 @@ class DecoderSpec(nn.Module):
         super(DecoderSpec, self).__init__()
 
         # Layer parameters
-        self.hidden_dim = 256
+        self.hidden_dim = hidden_dim
 
         # Fully connected layers
         self.lin_1 = nn.Linear(latent_dim+spec_dim+cos_dim, self.hidden_dim)
@@ -54,10 +54,10 @@ class DecoderSpec(nn.Module):
     def forward(self, z):
         batch_size = z.size(0)
         z = z.view((batch_size,-1))
-        
+
         # Fully connected layers with ReLu activations
         x = torch.relu(self.lin_1(z))
-        x = torch.relu(self.lin_mid(x))
+        x = self.lin_mid(x)
         x = self.lin_f(x)
         x = x.view((batch_size,-1))
 

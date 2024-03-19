@@ -51,7 +51,7 @@ def log_density_gaussian(x, mu, logvar):
     return log_density
 
 
-def log_importance_weight_matrix(batch_size, dataset_size):
+def log_importance_weight_matrix(batch_size, dataset_size, device):
     """
     Calculates a log importance weight matrix
 
@@ -66,7 +66,7 @@ def log_importance_weight_matrix(batch_size, dataset_size):
     N = dataset_size
     M = batch_size - 1
     strat_weight = (N - M) / (N * M)
-    W = torch.Tensor(batch_size, batch_size).fill_(1 / M)
+    W = torch.full((batch_size, batch_size), 1 / M, device=device)
     W.view(-1)[::M + 1] = 1 / N
     W.view(-1)[1::M + 1] = strat_weight
     W[M - 1, 0] = strat_weight

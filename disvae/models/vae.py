@@ -10,7 +10,6 @@ from .encoders import EncoderSpec
 from .decoders import DecoderSpec
 
 MODELS = ["Burgess"]
-cos_dim = 3
 
 def init_specific_model(model_type, spec_length, latent_dim, hyperparameters):
     """Return an instance of a VAE with encoder and decoder from `model_type`."""
@@ -27,18 +26,18 @@ def init_specific_model(model_type, spec_length, latent_dim, hyperparameters):
 
 
 class VAE(nn.Module):
-    def __init__(self, spec_dim, latent_dim, hyperparameters = [3,3], cos_dim=4):
+    def __init__(self, spec_dim, latent_dim, hyperparameters = [3,3,64], cos_dim=4):
         """
         Class which defines model and forward pass.
 
         input size: [1, 1, 4, spec_dim+cos_dim]
         """
         super(VAE, self).__init__()
-        e_layers, d_layers = hyperparameters
+        e_layers, d_layers, hidden_dim = hyperparameters
         self.spec_dim = spec_dim
         self.latent_dim = latent_dim
-        self.encoder = EncoderSpec(spec_dim, e_layers, latent_dim = latent_dim, cos_dim = cos_dim)
-        self.decoder = DecoderSpec(spec_dim, d_layers, latent_dim = latent_dim, cos_dim = cos_dim)
+        self.encoder = EncoderSpec(spec_dim, e_layers, latent_dim = latent_dim, cos_dim = cos_dim, hidden_dim=hidden_dim)
+        self.decoder = DecoderSpec(spec_dim, d_layers, latent_dim = latent_dim, cos_dim = cos_dim, hidden_dim=hidden_dim)
 
         self.reset_parameters()
 
