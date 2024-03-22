@@ -275,12 +275,13 @@ def _get_log_pz_qz_prodzi_qzCx(latent_sample, latent_dist, n_data, is_mss=True):
     log_pz = log_density_gaussian(latent_sample, zeros, zeros).sum(dim=1)
 
     mat_log_qz = matrix_log_density_gaussian(latent_sample, *latent_dist)
+    mat_log_qz_ = mat_log_qz.sum(dim=2)
 
     if is_mss:
         # use stratification
         log_iw_mat = log_importance_weight_matrix(batch_size, n_data, device=latent_sample.device)
-        mat_log_qz_ = mat_log_qz.sum(dim=2, keepdim=True) + log_iw_mat.view(batch_size, batch_size, 1)
-        mat_log_qz = mat_log_qz + log_iw_mat.view(batch_size, batch_size, 1)
+        mat_log_qz_ = mat_log_qz_ + log_iw_mat
+        mat_log_qz = mat_log_qz + log_iw_mat.unsqueeze(2)
 
     log_qz = torch.logsumexp(mat_log_qz_, dim=1, keepdim=False)
     log_prod_qzi = torch.logsumexp(mat_log_qz, dim=1, keepdim=False).sum(dim=1)
