@@ -41,7 +41,7 @@ def objective(trial):
                 cos_dim=cos_dim,
                ).to(device, non_blocking=True)
     #TODO confirm whether to use 512*16, 512*4, or 512 as n_data here
-    criterion = BtcvaeLoss(len(t_dataset), alpha=alpha, beta=beta, gamma=gamma, tau=tau)
+    criterion = BtcvaeLoss(len(t_dataset), alpha=alpha, beta=beta, gamma=gamma, tau=tau, is_mss=True)
     assert len(t_dataset) == len(v_dataset), 'otherwise we need two criteria'
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(b1, b2), weight_decay=wd)
     scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, threshold=0.01)
