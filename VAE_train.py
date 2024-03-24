@@ -5,7 +5,8 @@ from datetime import date
 
 import numpy as np
 import torch
-from torch.optim import lr_scheduler
+from torch.optim import AdamW, lr_scheduler
+from torch.utils.data import TensorDataset, DataLoader
 import optuna
 from optuna.trial import TrialState
 
@@ -14,116 +15,111 @@ from disvae.models.losses import BtcvaeLoss
 
 
 def objective(trial):
-    #training hyperparams
-    lr = trial.suggest_float('lr', 1e-6, 1e-3, log=True)
-    b1 = 1 - trial.suggest_float('1-β₁', 0.1, 0.5, log=True)
-    b2 = 1 - trial.suggest_float('1-β₂', 1e-3, 0.1, log=True)
-    wd = trial.suggest_float('wd', 1e-6, 1e-3, log=True)
-    batch_size = 2 ** trial.suggest_int('㏒₂B', 7, 13)
-
     #model hyperparams
-    depth = trial.suggest_int('D', 1, 7)
-    width = 2 ** trial.suggest_int('㏒₂W', 4, 9)
-    cos_dim = 4
-    spec_dim = 18
+    conv_depth = trial.suggest_int('Dꟲ', 2, 4)
+    conv_width = trial.suggest_int('Wꟲ', 4, 9)  # number of channels
+    mlp_depth = trial.suggest_int('Dᴹ', 2, 5)
+    mlp_width = 2 ** trial.suggest_int('㏒₂Wᴹ', 4, 9)
+    bn_mode = trial.suggest_categorical('BA', ['BA', 'A', 'AB'])
 
     #loss hyperparams
-    tau = trial.suggest_float('τ', 0.1, 100, log=True)
+    lamda = trial.suggest_float('λ', 0.01, 10, log=True)
     alpha = - trial.suggest_int('-α', 1, 100, log=True)
     beta = trial.suggest_int('β', 1, 100, log=True)
     gamma = trial.suggest_float('γ', 0.1, 10, log=True)
 
-    t_loader = torch.utils.data.DataLoader(t_dataset, batch_size=batch_size, shuffle=True)
-    v_loader = torch.utils.data.DataLoader(v_dataset, batch_size=len(v_dataset), shuffle=False)
-    model = VAE(spec_dim=spec_dim,
-                latent_dim=latent_dim,
-                hyperparameters=[depth, depth, width],
-                cos_dim=cos_dim,
-               ).to(device, non_blocking=True)
-    #TODO confirm whether to use 512*16, 512*4, or 512 as n_data here
-    criterion = BtcvaeLoss(len(t_dataset), alpha=alpha, beta=beta, gamma=gamma, tau=tau, is_mss=True)
+    #training hyperparams
+    lr = trial.suggest_float('lr', 1e-6, 1e-2, log=True)
+    b1 = 1 - trial.suggest_float('1-β₁', 0.1, 0.5, log=True)
+    b2 = 1 - trial.suggest_float('1-β₂', 1e-3, 0.1, log=True)
+    wd = trial.suggest_float('wd', 1e-6, 1e-3, log=True)
+    batch_size = 2 ** trial.suggest_int('㏒₂B', 6, 9)
+
+    t_loader = DataLoader(t_dataset, batch_size=batch_size, shuffle=True)
+    v_loader = DataLoader(v_dataset, batch_size=len(v_dataset), shuffle=False)
+    model = VAE(num_z, P_shape, num_p,
+                conv_depth, conv_width, mlp_depth, mlp_width,
+                bn_mode).to(device, non_blocking=True)
+    criterion = BtcvaeLoss(len(t_dataset), lamda=lamda, alpha=alpha, beta=beta,
+                           gamma=gamma, sampling=sampling)
     assert len(t_dataset) == len(v_dataset), 'otherwise we need two criteria'
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(b1, b2), weight_decay=wd)
+    optimizer = AdamW(model.parameters(), lr=lr, betas=(b1, b2), weight_decay=wd)
     scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, threshold=0.01)
 
-    epoch = 0
-    min_train_loss, min_valid_loss = math.inf, math.inf
-    min_recon_loss, max_mi_loss = math.inf, -math.inf
-    min_tc_loss, min_dw_kl_loss = math.inf, math.inf
-    min_kl_loss = math.inf
-    while optimizer.param_groups[0]['lr'] > 1e-8:
+    min_train, min_valid = math.inf, math.inf
+    min_rec, max_mi, min_tc, min_dwkl = math.inf, -math.inf, math.inf, math.inf
+    min_kl = math.inf
+    for epoch in range(1000):
+        if optimizer.param_groups[0]['lr'] <= 1e-8:
+            break
+
         model.train()
         storer = {k: torch.zeros(1, device=device) for k in
-                  ['loss', 'recon_loss', 'mi_loss', 'tc_loss', 'dw_kl_loss', 'kl_loss']
-                  + [f'kl_loss_{d}' for d in range(latent_dim)]}
-        for x_batch, y_batch in t_loader:
-            z, latent_dis, latent_sample = model(x_batch)
-            loss = criterion(y_batch, z, latent_dist=latent_dis, is_train=True,
-                             storer=storer, latent_sample=latent_sample)
+                  ['loss', 'rec', 'mi', 'tc', 'dwkl', 'kl']
+                  + [f'kl_{d}' for d in range(num_z)]}
+        for P, p in t_loader:
+            Prat = P[:, 1]
+            loss = criterion(*model(P, p), Prat, storer=storer)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-        epoch_loss = storer['loss'].item() / len(t_loader) / tau
-        min_train_loss = min(epoch_loss, min_train_loss)
+        epoch_loss = storer['loss'].item() / len(t_loader)
+        min_train = min(epoch_loss, min_train)
 
         model.eval()
         storer = {k: torch.zeros(1, device=device) for k in
-                  ['loss', 'recon_loss', 'mi_loss', 'tc_loss', 'dw_kl_loss', 'kl_loss']
-                  + [f'kl_loss_{d}' for d in range(latent_dim)]}
+                  ['loss', 'rec', 'mi', 'tc', 'dwkl', 'kl']
+                  + [f'kl_{d}' for d in range(num_z)]}
         with torch.no_grad():
-            for x_batch, y_batch in v_loader:
-                z, latent_dis, latent_sample = model(x_batch)
-                loss = criterion(y_batch, z, latent_dist=latent_dis, is_train=False,
-                                 storer=storer,latent_sample=latent_sample)
-            epoch_loss = storer['loss'].item() / len(v_loader) / tau
-            recon_loss = storer['recon_loss'].item() / len(v_loader)
-            mi_loss = storer['mi_loss'].item() / len(v_loader)
-            tc_loss = storer['tc_loss'].item() / len(v_loader)
-            dw_kl_loss = storer['dw_kl_loss'].item() / len(v_loader)
-            kl_loss = storer['kl_loss'].item() / len(v_loader)
-            min_valid_loss = min(epoch_loss, min_valid_loss)
-            min_recon_loss = min(recon_loss, min_recon_loss)
-            max_mi_loss = max(mi_loss, max_mi_loss)
-            min_tc_loss = min(tc_loss, min_tc_loss)
-            min_dw_kl_loss = min(dw_kl_loss, min_dw_kl_loss)
-            min_kl_loss = min(kl_loss, min_kl_loss)
+            for P, p in v_loader:
+                Prat = P[:, 1]
+                loss = criterion(*model(P, p), Prat, storer=storer)
+            epoch_loss = storer['loss'].item() / len(v_loader)
+            rec = storer['rec'].item() / len(v_loader)
+            mi = storer['mi'].item() / len(v_loader)
+            tc = storer['tc'].item() / len(v_loader)
+            dwkl = storer['dwkl'].item() / len(v_loader)
+            kl = storer['kl'].item() / len(v_loader)
+            min_valid = min(epoch_loss, min_valid)
+            min_rec = min(rec, min_rec)
+            max_mi = max(mi, max_mi)
+            min_tc = min(tc, min_tc)
+            min_dwkl = min(dwkl, min_dwkl)
+            min_kl = min(kl, min_kl)
 
         scheduler.step(epoch_loss)
 
-        epoch += 1
-
-    print(f'{trial.number=}, {epoch=}, {min_train_loss=}, {min_valid_loss=}')
-    print(f'  {min_recon_loss=}, {max_mi_loss=}, {min_tc_loss=}, {min_dw_kl_loss=} '
-          + f'{min_kl_loss=}', flush=True)
+    print(f'{trial.number=}, {epoch=}, {min_train=}, {min_valid=}')
+    print(f'  {min_rec=}, {max_mi=}, {min_tc=}, {min_dwkl=} {min_kl=}', flush=True)
 
     trial.set_user_attr('epoch', epoch)
-    trial.set_user_attr('min_train_loss', min_train_loss)
-    trial.set_user_attr('min_valid_loss', min_valid_loss)
-    trial.set_user_attr('min_recon_loss', min_recon_loss)
-    trial.set_user_attr('max_mi_loss', max_mi_loss)
-    trial.set_user_attr('min_tc_loss', min_tc_loss)
-    trial.set_user_attr('min_dw_kl_loss', min_dw_kl_loss)
-    trial.set_user_attr('min_kl_loss', min_kl_loss)
+    trial.set_user_attr('min_train', min_train)
+    trial.set_user_attr('min_valid', min_valid)
+    trial.set_user_attr('min_rec', min_rec)
+    trial.set_user_attr('max_mi', max_mi)
+    trial.set_user_attr('min_tc', min_tc)
+    trial.set_user_attr('min_dwkl', min_dwkl)
+    trial.set_user_attr('min_kl', min_kl)
 
-    states = {
-        'epoch': epoch,
-        'model': model.state_dict(),
-        'optimizer': optimizer.state_dict(),
-        'scheduler': scheduler.state_dict(),
-        'rng': torch.get_rng_state(),
-        'min_train_loss': min_train_loss,
-        'min_valid_loss': min_valid_loss,
-        'min_recon_loss': min_recon_loss,
-        'max_mi_loss': max_mi_loss,
-        'min_tc_loss': min_tc_loss,
-        'min_dw_kl_loss': min_dw_kl_loss,
-        'min_kl_loss': min_kl_loss,
-    }
-    torch.save(states, f'{study_path}/{trial.number}.pt')
+    #states = {
+    #    'epoch': epoch,
+    #    'model': model.state_dict(),
+    #    'optimizer': optimizer.state_dict(),
+    #    'scheduler': scheduler.state_dict(),
+    #    'rng': torch.get_rng_state(),
+    #    'min_train': min_train,
+    #    'min_valid': min_valid,
+    #    'min_rec': min_rec,
+    #    'max_mi': max_mi,
+    #    'min_tc': min_tc,
+    #    'min_dwkl': min_dwkl,
+    #    'min_kl': min_kl,
+    #}
+    #torch.save(states, f'{study_path}/{trial.number}.pt')
 
     torch.cuda.empty_cache()
 
-    return min_recon_loss, max_mi_loss, min_tc_loss
+    return min_rec, max_mi, min_tc
 
 
 def main():
@@ -137,14 +133,14 @@ def main():
 
     study = optuna.create_study(
         storage=f'sqlite:///{study_path}/optuna.db',
-        sampler=optuna.samplers.TPESampler(n_startup_trials=n_startup_trials),
+        sampler=optuna.samplers.TPESampler(n_startup_trials=n_startup_trials, seed=42),
         pruner=None,  # currently not for multi-objective optimization
         load_if_exists=True,
         directions=['minimize', 'maximize', 'minimize'],
         #directions=['minimize', 'maximize', 'minimize', 'minimize', 'minimize'],
     )
-    study.set_metric_names(['recon_loss', 'mi_loss', 'tc_loss'])
-    #study.set_metric_names(['recon_loss', 'mi_loss', 'tc_loss', 'dw_kl_loss', 'kl_loss'])
+    study.set_metric_names(['rec', 'mi', 'tc'])
+    #study.set_metric_names(['rec', 'mi', 'tc', 'dwkl', 'kl'])
     study.optimize(objective, n_trials=n_trials, timeout=timeout, gc_after_trial=True)
 
     pruned_trials = study.get_trials(deepcopy=False, states=[TrialState.PRUNED])
@@ -167,11 +163,11 @@ def main():
     print('Pareto front:')
     trials = sorted(study.best_trials, key=lambda trial: trial.values)
     for trial in trials:
-        recon_loss, mi_loss, tc_loss = trial.values
-        #recon_loss, mi_loss, tc_loss, dw_kl_loss, kl_loss = trial.values
+        rec, mi, tc = trial.values
+        #rec, mi, tc, dwkl, kl = trial.values
         print(f'  Trial#{trial.number}')
-        print(f'    Values: {recon_loss=}, {mi_loss=}, {tc_loss=}')
-        #print(f'    Values: {recon_loss=}, {mi_loss=}, {tc_loss=}, {dw_kl_loss=} {kl_loss=}')
+        print(f'    Values: {rec=}, {mi=}, {tc=}')
+        #print(f'    Values: {rec=}, {mi=}, {tc=}, {dwkl=} {kl=}')
         print(f'    Params: {trial.params}')
 
     print('Trials:')
@@ -181,17 +177,27 @@ def main():
 
 
 if __name__ == '__main__':
-    latent_dim = int(sys.argv[1])
+    num_z = int(sys.argv[1])
+    sampling = sys.argv[2]
 
-    study_path = f"models/d{latent_dim}_{date.today().strftime('%m%d')}"
+    study_path = f"models/d{num_z}_{sampling}_{date.today().strftime('%m%d')}"
     os.makedirs(study_path, exist_ok=True)
     device = torch.device('cuda', 0)
 
-    data_set = np.load('repeat_data.npy')
-    data_set = data_set.reshape([1024*16, 4, 22]).astype(np.float32)
-    t_set = torch.tensor(data_set[:512*16]).to(device)
-    t_dataset = torch.utils.data.TensorDataset(t_set[:, :3], t_set[:, 3, :18])
-    v_set = torch.tensor(data_set[512*16:]).to(device)
-    v_dataset = torch.utils.data.TensorDataset(v_set[:, :3], v_set[:, 3, :18])
+    P_set = np.load('IllustrisTNG_powers.npy')[:, :2]  # shape = (1024, 2, 4, 18)
+    P_set = torch.from_numpy(P_set).to(device)
+    P_set = torch.log(P_set)
+    P_set[:, 1] -= P_set[:, 0]
+    Pt_set, Pv_set = P_set[:512], P_set[512:]
+
+    p_set = np.load('IllustrisTNG_params.npy')[:, 0, -1]  # shape = (1024, 3)
+    p_set = torch.from_numpy(p_set).to(device)
+    p_set = torch.log(p_set)
+    pt_set, pv_set = p_set[:512], p_set[512:]
+
+    P_shape, num_p = P_set.shape[1:], p_set.shape[1]
+
+    t_dataset = TensorDataset(Pt_set, pt_set)
+    v_dataset = TensorDataset(Pv_set, pv_set)
 
     main()

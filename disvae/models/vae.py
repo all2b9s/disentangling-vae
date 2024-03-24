@@ -1,97 +1,142 @@
-"""
-Module containing the main VAE class.
-"""
+from collections import OrderedDict
+import math
+
 import torch
-from torch import nn, optim
-from torch.nn import functional as F
+from torch import nn
 
-from disvae.utils.initialization import weights_init
-from .encoders import EncoderSpec
-from .decoders import DecoderSpec
 
-MODELS = ["Burgess"]
+def module_with_param_init(Module):
+    class ModuleWithParamInit(Module):
+        def __init__(self, *args, linear=False, leaky_slope=0, **kwargs):
+            self.nonlinearity = 'linear' if linear else 'leaky_relu'
+            self.leaky_slope = leaky_slope
+            super().__init__(*args, **kwargs)
 
-def init_specific_model(model_type, spec_length, latent_dim, hyperparameters):
-    """Return an instance of a VAE with encoder and decoder from `model_type`."""
-    model_type = model_type.lower().capitalize()
-    if model_type not in MODELS:
-        err = "Unkown model_type={}. Possible values: {}"
-        raise ValueError(err.format(model_type, MODELS))
+        def reset_parameters(self):
+            nn.init.kaiming_uniform_(self.weight, a=self.leaky_slope,
+                                    nonlinearity=self.nonlinearity)
+            if self.bias is not None:
+                fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+                bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+                nn.init.uniform_(self.bias, -bound, bound)
 
-    encoder = get_encoder(model_type)
-    decoder = get_decoder(model_type)
-    model = VAE(spec_length, encoder, decoder, latent_dim, hyperparameters)
-    model.model_type = model_type  # store to help reloading
-    return model
+    return ModuleWithParamInit
+
+Linear = module_with_param_init(nn.Linear)
+Conv1d = module_with_param_init(nn.Conv1d)
+
+
+def get_block(header, l, in_width, out_width, leaky_slope, bn_mode):
+    if header[1] == 'c':
+        lin = f'{header}c{l}', Conv1d(in_width, out_width, 1, leaky_slope=leaky_slope)
+    elif header[1] == 'm':
+        lin = f'{header}l{l}', Linear(in_width, out_width, leaky_slope=leaky_slope)
+    else:
+        raise ValueError(f'{header=} not supported')
+
+    act = f'{header}a{l}', nn.LeakyReLU(negative_slope=leaky_slope)
+    if bn_mode == 'A':
+        return [lin, act]
+
+    bn = f'{header}b{l}', nn.BatchNorm1d(out_width)
+    if bn_mode == 'BA':
+        return [lin, bn, act]
+    elif bn_mode == 'AB':
+        return [lin, act, bn]
+    else:
+        raise ValueError(f'{bn_mode=} not supported')
 
 
 class VAE(nn.Module):
-    def __init__(self, spec_dim, latent_dim, hyperparameters = [3,3,64], cos_dim=4):
-        """
-        Class which defines model and forward pass.
+    def __init__(self, num_z=2, P_shape=(2, 4, 18), num_p=3,
+                 conv_depth=2, conv_width=4, mlp_depth=3, mlp_width=64,
+                 bn_mode='A'):  #FIXME use optuna best hyperparams
+        super().__init__()
 
-        input size: [1, 1, 4, spec_dim+cos_dim]
-        """
-        super(VAE, self).__init__()
-        e_layers, d_layers, hidden_dim = hyperparameters
-        self.spec_dim = spec_dim
-        self.latent_dim = latent_dim
-        self.encoder = EncoderSpec(spec_dim, e_layers, latent_dim = latent_dim, cos_dim = cos_dim, hidden_dim=hidden_dim)
-        self.decoder = DecoderSpec(spec_dim, d_layers, latent_dim = latent_dim, cos_dim = cos_dim, hidden_dim=hidden_dim)
+        self.num_z = num_z
+        two, num_a, num_k = P_shape
+        self.num_a = num_a
+        self.num_k = num_k
+        self.num_p = num_p
+        self.conv_depth = conv_depth
+        self.conv_width = conv_width
+        self.mlp_depth = mlp_depth
+        self.mlp_width = mlp_width
+        assert conv_depth >= 2 and conv_width >= num_a and mlp_depth >= 2
 
-        self.reset_parameters()
+        leaky_slope = 1 / torch.e
+
+        self.econv = OrderedDict()
+        for l in range(conv_depth):
+            in_chan = two * num_a + num_p if l == 0 else conv_width
+            self.econv.update(get_block('ec', l, in_chan, conv_width, leaky_slope,
+                                        bn_mode))
+        self.econv = nn.Sequential(self.econv)
+
+        self.emlp = OrderedDict()
+        for l in range(mlp_depth - 1):
+            in_feat = conv_width * num_k + num_p if l == 0 else mlp_width
+            self.emlp.update(get_block('em', l, in_feat, mlp_width, leaky_slope,
+                                       bn_mode))
+        out_feat = 2 * num_z
+        self.emlp[f'ema{mlp_depth-1}'] = Linear(mlp_width, out_feat, linear=True)
+        self.emlp = nn.Sequential(self.emlp)
+
+        self.dmlp = OrderedDict()
+        for l in range(mlp_depth):
+            in_feat = num_z + num_p if l == 0 else mlp_width
+            out_feat = conv_width * num_k if l == mlp_depth - 1 else mlp_width
+            self.dmlp.update(get_block('dm', l, in_feat, out_feat, leaky_slope,
+                                       bn_mode))
+        self.dmlp = nn.Sequential(self.dmlp)
+
+        self.dconv = OrderedDict()
+        for l in range(conv_depth - 1):
+            in_chan = conv_width + num_a + num_p if l == 0 else conv_width
+            leaky_slope_ = 0 if l == conv_depth - 2 else leaky_slope
+            self.dconv.update(get_block('dc', l, in_chan, conv_width, leaky_slope_,
+                                        bn_mode))
+        out_chan = num_a
+        self.dconv[f'dcc{conv_depth-1}'] = Conv1d(conv_width, out_chan, 1, bias=False,
+                                                  linear=True)
+        self.dconv = nn.Sequential(self.dconv)
+
+    def encode(self, P, p):
+        P = P.flatten(start_dim=1, end_dim=2)
+        x = torch.cat([P, p.unsqueeze(2).repeat(1, 1, self.num_k)], dim=1)
+        x = self.econv(x)
+
+        x = x.flatten(start_dim=1, end_dim=2)
+        x = torch.cat([x, p], dim=1)
+        x = self.emlp(x)
+
+        x = x.unflatten(1, (2, self.num_z))
+        mean, logvar = x[:, 0], x[:, 1]
+        return mean, logvar
 
     def reparameterize(self, mean, logvar):
-        """
-        Samples from a normal distribution using the reparameterization trick.
-
-        Parameters
-        ----------
-        mean : torch.Tensor
-            Mean of the normal distribution. Shape (batch_size, latent_dim)
-
-        logvar : torch.Tensor
-            Diagonal log variance of the normal distribution. Shape (batch_size,
-            latent_dim)
-        """
         if self.training:
             std = torch.exp(0.5 * logvar)
             eps = torch.randn_like(std)
             return mean + std * eps
-        else:
-            # Reconstruction mode
-            return mean
+        return mean
 
-    def forward(self, x):
-        """
-        Forward pass of model.
+    def decode(self, z, Pdmo, p):
+        x = torch.cat([z, p], dim=1)
+        x = self.dmlp(x)
 
-        Parameters
-        ----------
-        x : torch.Tensor
-            Batch of data. Shape (batch_size, n_chan, n_spec+n_cos)
-        """
-        batch_size = x.size(0)
-        input_data = x[:,:2,:]
-        target_data = x[:,2:3,:].clone().view((batch_size,-1))
-        latent_dist = self.encoder(input_data)
-        latent_sample = self.reparameterize(*latent_dist)
-        dc_input = torch.cat([latent_sample,target_data],dim=1)
-        reconstruct = self.decoder(dc_input)
-        return reconstruct, latent_dist, latent_sample
+        x = x.unflatten(1, (self.conv_width, self.num_k))
+        x = torch.cat([x, Pdmo, p.unsqueeze(2).repeat(1, 1, self.num_k)], dim=1)
+        Prec = self.dconv(x)
 
-    def reset_parameters(self):
-        self.apply(weights_init)
+        return Prec
 
-    def sample_latent(self, x):
-        """
-        Returns a sample from the latent distribution.
+    def forward(self, P, p):
+        mean, logvar = self.encode(P, p)
 
-        Parameters
-        ----------
-        x : torch.Tensor
-            Batch of data. Shape (batch_size, n_chan, height, width)
-        """
-        latent_dist = self.encoder(x)
-        latent_sample = self.reparameterize(*latent_dist)
-        return latent_sample
+        z = self.reparameterize(mean, logvar)
+
+        Pdmo = P[:, 0]
+        Prec = self.decode(z, Pdmo, p)
+
+        return mean, logvar, z, Prec

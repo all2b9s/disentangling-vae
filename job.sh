@@ -3,16 +3,21 @@
 #SBATCH --job-name=barpar
 #SBATCH --output=%x-%j.out
 #SBATCH --partition=gpu
-#SBATCH --constraint=v100
+#SBATCH --constraint=h100
 #SBATCH --gpus=1
-#SBATCH --cpus-per-gpu=1
+#SBATCH --cpus-per-gpu=16
 #SBATCH --time=7-00:00:00
 
 
-python VAE_train.py 1 > d1.log 2>&1 &
-python VAE_train.py 2 > d2.log 2>&1 &
-python VAE_train.py 3 > d3.log 2>&1 &
-python VAE_train.py 4 > d4.log 2>&1 &
-python VAE_train.py 5 > d5.log 2>&1 &
+mamba activate pytorch
 
-wait
+num_z=2
+sampling=mws
+echo num_z = $numz
+echo sampling = $sampling
+
+hostname; pwd; date
+
+time python VAE_train.py $num_z $sampling
+
+date
