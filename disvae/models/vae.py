@@ -79,7 +79,7 @@ class VAE(nn.Module):
             self.emlp.update(get_block('em', l, in_feat, mlp_width, leaky_slope,
                                        bn_mode))
         out_feat = 2 * num_z
-        self.emlp[f'ema{mlp_depth-1}'] = Linear(mlp_width, out_feat, linear=True)
+        self.emlp[f'eml{mlp_depth-1}'] = Linear(mlp_width, out_feat, linear=True)
         self.emlp = nn.Sequential(self.emlp)
 
         self.dmlp = OrderedDict()

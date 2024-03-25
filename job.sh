@@ -9,15 +9,13 @@
 #SBATCH --time=7-00:00:00
 
 
-mamba activate pytorch
+source /mnt/home/yinli/mamba/bin/activate pytorch
 
-num_z=2
-sampling=mws
-echo num_z = $numz
-echo sampling = $sampling
+[[ -z $num_z ]] && exit 1
+echo num_z = $num_z
 
 hostname; pwd; date
 
-time python VAE_train.py $num_z $sampling
+time python VAE_train.py $num_z
 
 date

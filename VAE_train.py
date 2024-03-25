@@ -24,8 +24,8 @@ def objective(trial):
 
     #loss hyperparams
     lamda = trial.suggest_float('λ', 0.01, 10, log=True)
-    alpha = - trial.suggest_int('-α', 1, 100, log=True)
-    beta = trial.suggest_int('β', 1, 100, log=True)
+    alpha = - trial.suggest_float('-α', 1, 100, log=True)
+    beta = trial.suggest_float('β', 1, 100, log=True)
     gamma = trial.suggest_float('γ', 0.1, 10, log=True)
 
     #training hyperparams
@@ -41,7 +41,7 @@ def objective(trial):
                 conv_depth, conv_width, mlp_depth, mlp_width,
                 bn_mode).to(device, non_blocking=True)
     criterion = BtcvaeLoss(len(t_dataset), lamda=lamda, alpha=alpha, beta=beta,
-                           gamma=gamma, sampling=sampling)
+                           gamma=gamma)
     assert len(t_dataset) == len(v_dataset), 'otherwise we need two criteria'
     optimizer = AdamW(model.parameters(), lr=lr, betas=(b1, b2), weight_decay=wd)
     scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, threshold=0.01)
@@ -115,7 +115,7 @@ def objective(trial):
     #    'min_dwkl': min_dwkl,
     #    'min_kl': min_kl,
     #}
-    #torch.save(states, f'{study_path}/{trial.number}.pt')
+    #torch.save(states, f'{study_path}_{trial.number}.pt')
 
     torch.cuda.empty_cache()
 
@@ -123,16 +123,12 @@ def objective(trial):
 
 
 def main():
-    n_trials = None  #2**11
+    n_trials = 2**14
     timeout = 6.9 * 24 * 3600
     n_startup_trials = 2**6
 
-    #n_trials = 1
-    #timeout = 7200
-    #n_startup_trials = 0
-
     study = optuna.create_study(
-        storage=f'sqlite:///{study_path}/optuna.db',
+        storage=f'sqlite:///{study_path}.db',
         sampler=optuna.samplers.TPESampler(n_startup_trials=n_startup_trials, seed=42),
         pruner=None,  # currently not for multi-objective optimization
         load_if_exists=True,
@@ -178,10 +174,9 @@ def main():
 
 if __name__ == '__main__':
     num_z = int(sys.argv[1])
-    sampling = sys.argv[2]
 
-    study_path = f"models/d{num_z}_{sampling}_{date.today().strftime('%m%d')}"
-    os.makedirs(study_path, exist_ok=True)
+    study_path = f"optuna/d{num_z}_{date.today().strftime('%m%d')}"
+    os.makedirs(os.path.dirname(study_path), exist_ok=True)
     device = torch.device('cuda', 0)
 
     P_set = np.load('IllustrisTNG_powers.npy')[:, :2]  # shape = (1024, 2, 4, 18)
