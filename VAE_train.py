@@ -1,6 +1,8 @@
 import math
+import os
+import shutil
 import sys
-from datetime import date
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -29,7 +31,7 @@ class Objective:
         conv_depth = trial.suggest_int('Dc', 2, 4)
         conv_width = trial.suggest_int('Wc', 4, 9)  # number of channels
         mlp_depth = trial.suggest_int('Dm', 2, 5)
-        mlp_width = 2 ** trial.suggest_int('log2_Wm', 4, 9)
+        mlp_width = 2 ** trial.suggest_int('log2(Wm)', 4, 9)
         bn_mode = trial.suggest_categorical('BA', ['BA', 'A', 'AB'])
 
         #loss hyperparams
@@ -46,7 +48,7 @@ class Objective:
         b1 = 1 - trial.suggest_float('1-b1', 0.1, 0.5, log=True)
         b2 = 1 - trial.suggest_float('1-b2', 1e-3, 0.1, log=True)
         wd = trial.suggest_float('wd', 1e-6, 1e-3, log=True)
-        batch_size = 2 ** trial.suggest_int('log2_B', 6, 9)
+        batch_size = 2 ** trial.suggest_int('log2(B)', 6, 9)
 
         t_loader = DataLoader(self.t_dataset, batch_size=batch_size, shuffle=True)
         v_loader = DataLoader(self.v_dataset, batch_size=len(self.v_dataset),
@@ -134,7 +136,8 @@ class Objective:
 
 
 def optune(num_z, P_shape, num_p, t_dataset, v_dataset, device):
-    n_trials = 2**14
+    n_tasks = os.environ['SLURM_NTASKS']
+    n_trials = 2**14 // n_tasks
     timeout = 6.9 * 24 * 3600
     n_startup_trials = 2**6
 
@@ -147,12 +150,14 @@ def optune(num_z, P_shape, num_p, t_dataset, v_dataset, device):
     )
 
     # both optuna<3.6.0 and file system can crash journal storage
-    storage = JournalStorage(JournalFileStorage(f'/dev/shm/optuna_d{num_z}.journal'))
+    timestamp = datetime.now().strftime('%m%d%H%M%S')
+    journal = f'/dev/shm/optuna_d{num_z}_{timestamp}.log'
+    storage = JournalStorage(JournalFileStorage(journal))
     study = optuna.create_study(
         storage=storage,
         sampler=sampler,
         pruner=None,  # currently not for multi-objective optimization
-        study_name=f"{date.today().strftime('%m%d')}",
+        study_name='foo',
         load_if_exists=True,
         directions=['minimize'] * (1 if num_z == 0 else 2),
     )
@@ -162,6 +167,7 @@ def optune(num_z, P_shape, num_p, t_dataset, v_dataset, device):
                           device)
 
     study.optimize(objective, n_trials=n_trials, timeout=timeout, gc_after_trial=True)
+    shutil.move(journal, os.path.basename(journal))
 
     pruned_trials = study.get_trials(deepcopy=False, states=[TrialState.PRUNED])
     complete_trials = study.get_trials(deepcopy=False, states=[TrialState.COMPLETE])

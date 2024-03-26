@@ -18,6 +18,5 @@ echo num_z = $num_z
 hostname; pwd; date
 
 time srun python VAE_train.py $num_z
-cp /dev/shm/optuna_d${num_z}.journal .
 
 date
