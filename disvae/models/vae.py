@@ -16,9 +16,7 @@ def module_with_param_init(Module):
             nn.init.kaiming_uniform_(self.weight, a=self.leaky_slope,
                                     nonlinearity=self.nonlinearity)
             if self.bias is not None:
-                fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
-                bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-                nn.init.uniform_(self.bias, -bound, bound)
+                nn.init.zeros_(self.bias)
 
     return ModuleWithParamInit
 
