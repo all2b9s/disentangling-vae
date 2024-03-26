@@ -48,7 +48,7 @@ def get_block(header, l, in_width, out_width, leaky_slope, bn_mode):
 
 
 class VAE(nn.Module):
-    def __init__(self, num_z=2, P_shape=(2, 4, 18), num_p=3,
+    def __init__(self, num_z=1, P_shape=(2, 4, 18), num_p=3,
                  conv_depth=2, conv_width=4, mlp_depth=3, mlp_width=64,
                  bn_mode='A'):  #FIXME use optuna best hyperparams
         super().__init__()
@@ -66,21 +66,22 @@ class VAE(nn.Module):
 
         leaky_slope = 1 / torch.e
 
-        self.econv = OrderedDict()
-        for l in range(conv_depth):
-            in_chan = two * num_a + num_p if l == 0 else conv_width
-            self.econv.update(get_block('ec', l, in_chan, conv_width, leaky_slope,
-                                        bn_mode))
-        self.econv = nn.Sequential(self.econv)
+        if num_z >= 1:
+            self.econv = OrderedDict()
+            for l in range(conv_depth):
+                in_chan = two * num_a + num_p if l == 0 else conv_width
+                self.econv.update(get_block('ec', l, in_chan, conv_width, leaky_slope,
+                                            bn_mode))
+            self.econv = nn.Sequential(self.econv)
 
-        self.emlp = OrderedDict()
-        for l in range(mlp_depth - 1):
-            in_feat = conv_width * num_k + num_p if l == 0 else mlp_width
-            self.emlp.update(get_block('em', l, in_feat, mlp_width, leaky_slope,
-                                       bn_mode))
-        out_feat = 2 * num_z
-        self.emlp[f'eml{mlp_depth-1}'] = Linear(mlp_width, out_feat, linear=True)
-        self.emlp = nn.Sequential(self.emlp)
+            self.emlp = OrderedDict()
+            for l in range(mlp_depth - 1):
+                in_feat = conv_width * num_k + num_p if l == 0 else mlp_width
+                self.emlp.update(get_block('em', l, in_feat, mlp_width, leaky_slope,
+                                        bn_mode))
+            out_feat = 2 * num_z
+            self.emlp[f'eml{mlp_depth-1}'] = Linear(mlp_width, out_feat, linear=True)
+            self.emlp = nn.Sequential(self.emlp)
 
         self.dmlp = OrderedDict()
         for l in range(mlp_depth):
@@ -122,7 +123,7 @@ class VAE(nn.Module):
         return mean
 
     def decode(self, z, Pdmo, p):
-        x = torch.cat([z, p], dim=1)
+        x = p if z is None else torch.cat([z, p], dim=1)
         x = self.dmlp(x)
 
         x = x.unflatten(1, (self.conv_width, self.num_k))
@@ -132,11 +133,15 @@ class VAE(nn.Module):
         return Prec
 
     def forward(self, P, p):
-        mean, logvar = self.encode(P, p)
-
-        z = self.reparameterize(mean, logvar)
-
         Pdmo = P[:, 0]
+
+        if self.num_z == 0:
+            Prec = self.decode(None, Pdmo, p)
+
+            return None, None, None, Prec
+
+        mean, logvar = self.encode(P, p)
+        z = self.reparameterize(mean, logvar)
         Prec = self.decode(z, Pdmo, p)
 
         return mean, logvar, z, Prec

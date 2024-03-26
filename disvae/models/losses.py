@@ -42,6 +42,9 @@ class BtcvaeLoss:
     def __call__(self, mean, logvar, z, Prec, Prat, storer):
         rec = _reconstruction_loss(Prec, Prat, storer=storer)
 
+        if mean is None:
+            return rec
+
         log_pz, log_qz, log_prod_qzi, log_q_zCx = _get_log_pz_qz_prodzi_qzCx(
             mean, logvar, z, self.data_size)
         # I[z;x] = KL[q(z,x)||q(x)q(z)] = E_x[KL[q(z|x)||q(z)]]
