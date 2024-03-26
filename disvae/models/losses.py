@@ -40,10 +40,18 @@ class BtcvaeLoss:
         self.gamma = gamma
 
     def __call__(self, mean, logvar, z, Prec, Prat, storer):
-        rec = _reconstruction_loss(Prec, Prat, storer=storer)
+        rec = _reconstruction_loss(Prec, Prat, storer)
 
         if mean is None:
             return rec
+
+        # KL[q(z|x)||p(x)], for comparaison purposes when num_z > 1
+        kl = _kl_normal_loss(mean, logvar, storer)
+
+        num_z = mean.shape[1]
+        if num_z == 1:
+            loss = rec + self.lamda * kl  # lamda is the "beta" in beta-VAE
+            return loss
 
         log_pz, log_qz, log_prod_qzi, log_q_zCx = _get_log_pz_qz_prodzi_qzCx(
             mean, logvar, z, self.data_size)
@@ -53,39 +61,35 @@ class BtcvaeLoss:
         tc = (log_qz - log_prod_qzi).mean()
         # dwkl is KL[q(z)||p(z)] instead of usual KL[q(z|x)||p(z))]
         dwkl = (log_prod_qzi - log_pz).mean()
+        storer['mi'] += mi.detach()
+        storer['tc'] += tc.detach()
+        storer['dwkl'] += dwkl.detach()
 
         # total loss
         loss = rec + self.lamda * (self.alpha * mi + self.beta * tc + self.gamma * dwkl)
-        if storer is not None:
-            storer['loss'] += loss.detach()
-            storer['mi'] += mi.detach()
-            storer['tc'] += tc.detach()
-            storer['dwkl'] += dwkl.detach()
-            _ = _kl_normal_loss(mean, logvar, storer)  # for comparaison purposes
+        storer['loss'] += loss.detach()
 
         return loss
 
 
-def _reconstruction_loss(Prec, Prat, storer=None):
+def _reconstruction_loss(Prec, Prat, storer):
     loss = F.mse_loss(Prec, Prat)
 
-    if storer is not None:
-        storer['rec'] += loss.detach()
+    storer['rec'] += loss.detach()
 
     return loss
 
 
-def _kl_normal_loss(mean, logvar, storer=None):
+def _kl_normal_loss(mean, logvar, storer):
     num_z = mean.shape[1]
 
     # batch mean of kl for each latent dimension
     kl = 0.5 * (-1 - logvar + torch.exp(logvar) + mean ** 2).mean(dim=0)
     total_kl = kl.sum()
 
-    if storer is not None:
-        storer['kl'] += total_kl.detach()
-        for d in range(num_z):
-            storer[f'kl_{d}'] += kl[d].detach()
+    storer['kl'] += total_kl.detach()
+    for d in range(num_z):
+        storer[f'kl_{d}'] += kl[d].detach()
 
     return total_kl
 

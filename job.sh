@@ -5,7 +5,8 @@
 #SBATCH --partition=gpu
 #SBATCH --constraint=h100
 #SBATCH --gpus=1
-#SBATCH --cpus-per-gpu=16
+#SBATCH --ntasks-per-gpu=8
+#SBATCH --cpus-per-task=2
 #SBATCH --time=7-00:00:00
 
 
@@ -16,6 +17,7 @@ echo num_z = $num_z
 
 hostname; pwd; date
 
-time python VAE_train.py $num_z
+time srun python VAE_train.py $num_z
+cp /dev/shm/optuna_d${num_z}.journal .
 
 date
